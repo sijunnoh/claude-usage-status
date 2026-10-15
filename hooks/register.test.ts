@@ -1,6 +1,6 @@
 import type { SessionUsage } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
-import { SEP, crossed, fmtLeft, fmtTokens, format } from './register'
+import { SEP, crossed, fmtLeft, fmtTokens, format, mergeLimits } from './register'
 
 const now = Date.parse('2026-10-15T00:00:00Z')
 
@@ -55,6 +55,7 @@ test('computes context percent when missing', () => {
 test('start → minute boundary → time left ticks down every minute', async ($, on) => {
   // start 20s past a minute boundary
   const clock = mock.clock(on, { now: Date.parse('2026-10-15T00:00:20Z') })
+  mock.store(on)
   const statuses: (string | undefined)[] = []
   const usage: SessionUsage = {
     startedAt: 0,
@@ -82,6 +83,7 @@ test('start → minute boundary → time left ticks down every minute', async ($
 
 test('a second session.start keeps one timer', async ($, on) => {
   const clock = mock.clock(on, { now: 0 })
+  mock.store(on)
   let count = 0
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1 }, rateLimits: [{ kind: 'five_hour', percentUsed: 1, resetsAt: new Date(3_600_000).toISOString() }] } }))
   on('ui.status', () => (count++, { value: undefined }))
@@ -92,4 +94,43 @@ test('a second session.start keeps one timer', async ($, on) => {
   count = 0
   await clock.advance(60_000)
   expect(count).toBe(1)
+})
+
+test('keeps the last known window when a response has none', () => {
+  const now = Date.parse('2026-10-15T00:00:00Z')
+  const five = { kind: 'five_hour', percentUsed: 20, resetsAt: '2026-10-15T03:00:00Z' }
+  const week = { kind: 'seven_day', percentUsed: 9, resetsAt: '2026-10-20T00:00:00Z' }
+  expect(mergeLimits([five, week], [], now)).toEqual([five, week])
+  // a newer reading replaces the same kind
+  const five2 = { ...five, percentUsed: 25 }
+  expect(mergeLimits([five, week], [five2], now)).toEqual([five2, week])
+  // windows past their reset are dropped
+  expect(mergeLimits([five], [], Date.parse('2026-10-15T03:00:01Z'))).toEqual([])
+})
+
+test('an empty measurement keeps the limits on the status line', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-15T00:00:00Z') })
+  mock.store(on)
+  const statuses: (string | undefined)[] = []
+  const limits = [{ kind: 'five_hour', percentUsed: 10, resetsAt: '2026-10-15T01:00:00Z' }]
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1 }, rateLimits: limits } }))
+  on('ui.status', ($, e) => (statuses.push(e.text), { value: undefined }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.session.measure({ context: { window: 1 }, rateLimits: [], changed: ['rateLimits'] })
+  expect(statuses.at(-1)).toBe('10% used 1h 0m')
+})
+
+test('a new session starts with the stored limits', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-15T00:00:00Z') })
+  mock.store(on, { rateLimits: [{ kind: 'seven_day', percentUsed: 8, resetsAt: '2026-10-21T09:00:00Z' }] })
+  const statuses: (string | undefined)[] = []
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1 }, rateLimits: [] } }))
+  on('ui.status', ($, e) => (statuses.push(e.text), { value: undefined }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(statuses.at(-1)).toBe('8% used 6d 9h')
 })

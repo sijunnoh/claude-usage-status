@@ -69,6 +69,31 @@ export const crossed = (rateLimits: SessionRateLimit[], warned: Set<string>) =>
       .filter(c => !warned.has(c.key)),
   )
 
+// Drop windows whose reset time has passed
+export const fresh = (limits: SessionRateLimit[], now: number) =>
+  limits.filter(r => !r.resetsAt || Date.parse(r.resetsAt) > now)
+
+// Some responses carry no rate-limit headers; keep the last known window of
+// each kind until it resets, and let newer readings replace it
+export const mergeLimits = (known: SessionRateLimit[], next: SessionRateLimit[], now: number) => {
+  const kinds = new Set(next.map(r => r.kind))
+  return fresh([...next, ...known.filter(r => !kinds.has(r.kind))], now)
+}
+
+const STORE_KEY = 'rateLimits'
+
+const isLimit = (v: unknown): v is SessionRateLimit =>
+  typeof v === 'object' && v !== null &&
+  typeof (v as SessionRateLimit).kind === 'string' &&
+  typeof (v as SessionRateLimit).percentUsed === 'number'
+
+// Write the windows to the store only when they changed; returns what is stored now
+async function persist($: EngineInterface, limits: SessionRateLimit[], saved: string) {
+  const json = JSON.stringify(limits)
+  if (json !== saved) await $.store.set(STORE_KEY, limits)
+  return json
+}
+
 function warn($: EngineInterface, rateLimits: SessionRateLimit[], warned: Set<string>) {
   for (const c of crossed(rateLimits, warned)) {
     warned.add(c.key)
@@ -78,17 +103,31 @@ function warn($: EngineInterface, rateLimits: SessionRateLimit[], warned: Set<st
 
 export const register: Register = on => {
   let last: Figures | undefined
+  // Last known limit windows, also kept in $.store so a new session starts with them
+  let known: SessionRateLimit[] = []
+  let saved = ''
   const warned = new Set<string>()
   // Keep a single timer even if session.start fires again
   let timer: Timer | undefined
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    const show = async () => last && $.ui.status(format(last, await $.clock.now()))
+    const show = async () => {
+      if (!last) return
+      const now = await $.clock.now()
+      $.ui.status(format({ ...last, rateLimits: fresh(last.rateLimits, now) }, now))
+    }
 
-    last = await $.session.usage()
+    const stored = await $.store.get(STORE_KEY)
+    known = Array.isArray(stored) ? stored.filter(isLimit) : []
+    saved = JSON.stringify(known)
+
+    const usage = await $.session.usage()
+    known = mergeLimits(known, usage.rateLimits, await $.clock.now())
+    saved = await persist($, known, saved)
+    last = { ...usage, rateLimits: known }
     await show()
-    warn($, last.rateLimits, warned)
+    warn($, known, warned)
 
     // Time left is in minutes — redraw at the next minute boundary, then every minute
     const now = await $.clock.now()
@@ -101,9 +140,12 @@ export const register: Register = on => {
   })
 
   on('session.measure', async ($, e, next) => {
-    last = e
-    $.ui.status(format(e, await $.clock.now()))
-    warn($, e.rateLimits, warned)
+    const now = await $.clock.now()
+    known = mergeLimits(known, e.rateLimits, now)
+    saved = await persist($, known, saved)
+    last = { ...e, rateLimits: known }
+    $.ui.status(format(last, now))
+    warn($, known, warned)
     return next(e)
   })
 }
