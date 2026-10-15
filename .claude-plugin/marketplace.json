@@ -1,0 +1,14 @@
+{
+  "name": "claude-usage-status",
+  "owner": {
+    "name": "Sijun Noh"
+  },
+  "plugins": [
+    {
+      "name": "usage-status",
+      "source": "./",
+      "description": "Show 5-hour/7-day usage limits, time until reset, context, and session cost in the status line"
+    }
+  ],
+  "description": "Claude Code mods by Sijun Noh"
+}

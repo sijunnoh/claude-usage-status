@@ -1,0 +1,10 @@
+{
+  "name": "usage-status",
+  "version": "0.5.0",
+  "description": "Show 5-hour/7-day usage limits, time until reset, context, and session cost in the status line",
+  "author": {
+    "name": "Sijun Noh"
+  },
+  "repository": "https://github.com/sijunnoh/claude-usage-status",
+  "license": "MIT"
+}
